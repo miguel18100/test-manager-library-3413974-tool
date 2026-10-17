@@ -1,51 +1,35 @@
-# test-manager-library-3413974-tool
+# Manager Library · Tool
 
-> **Prueba técnica · Ficha ADSO 3413974**
-> Horario: de **9:15 a. m. a 3:00 p. m.** (15:00). Después, **feria de presentación** de cada proyecto.
+Sembrador de datos de demostración. Usa **solo la API** (nunca SQL directo) y deja el sistema listo
+para mostrarse: 1 bibliotecario, 40 libros, 10 socios y 15 préstamos, 3 de ellos vencidos
+(el reporte de más prestados y la lista de vencidos tienen datos).
 
-Este repositorio guarda las **utilidades** de *Manager Library*: el sembrador de datos de demostración, que usa la API. **Empieza vacío a propósito**: se construye en el fork de cada aprendiz.
+## Requisitos
 
-## Instrucciones
+- PHP 8.3+ con la extensión `curl`.
+- La API en marcha sobre una base **recién creada**.
+- La API iniciada con `ALLOW_SIMULATED_TIME=true`: los tres vencidos se registran con la cabecera
+  `X-Simulated-Time` (hace 20 días). Terminado el sembrado, vuelve a `false`.
 
-Cada aprendiz debe **crear el fork** de los seis repositorios del proyecto y **resolver el proyecto
-con el spec planteado**.
+## Uso
 
-1. Hacer fork, a su cuenta de GitHub, de cada repositorio de la tabla del final.
-2. Leer el spec en [`test-manager-library-3413974-docs`](https://github.com/code-sena/test-manager-library-3413974-docs).
-   Se entrega en dos versiones: `spec-python/` y `spec-.net/`.
-3. Desarrollar en los forks.
+```
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='la-misma-con-que-arrancó-la-API'
+# opcional: export API_URL=http://localhost:8000/api/v1
+# opcional: export SEED_LIBRARIAN_PASSWORD='...'   (si no, se genera y se imprime una sola vez)
+php seed.php
+```
 
-## El reto se desarrolla con React y PHP (Laravel)
+El script termina con error si algo no coincide: estado HTTP inesperado, base con datos previos o
+un número de vencidos distinto de 3. Las credenciales se leen del entorno; no hay ninguna en el código.
 
-El spec está escrito para Python y para .NET, pero el reto **no** se hace en esos lenguajes:
+## Qué siembra
 
-| Capa | Tecnología del reto |
-|---|---|
-| Frontend | React |
-| Backend | PHP con Laravel |
-
-Lo que el spec define sobre el negocio —historias, criterios de aceptación, reglas, contrato de la
-API, modelo de datos— se respeta. Lo que define sobre la tecnología se traduce a React y Laravel.
-
-## La prueba no consiste en escribir el código
-
-El propósito principal es ver la **capacidad de desempeño con SDD** (*Spec-Driven Development*,
-desarrollo guiado por especificación): cómo se lee, se interpreta y se aplica una especificación
-para llevarla a un stack distinto. El código es el medio, no el fin.
-
-## Feria de presentación
-
-Al cerrar la prueba (3:00 p. m.) cada aprendiz **presenta su proyecto** al grupo: qué construyó del spec, qué dejó fuera y por qué,
-y una demostración corta de lo que funciona (la aplicación y el sitio público). Lo que se presenta es lo que quedó **subido a los forks
-antes de las 3:00 p. m.**: no se presenta nada que no esté en GitHub.
-
-## Los seis repositorios
-
-| Repositorio | Qué va ahí |
-|---|---|
-| [`test-manager-library-3413974-docs`](https://github.com/code-sena/test-manager-library-3413974-docs) | El spec: `spec-python/` y `spec-.net/` |
-| [`test-manager-library-3413974-api`](https://github.com/code-sena/test-manager-library-3413974-api) | Backend en PHP (Laravel) |
-| [`test-manager-library-3413974-app`](https://github.com/code-sena/test-manager-library-3413974-app) | Frontend en React |
-| [`test-manager-library-3413974-page`](https://github.com/code-sena/test-manager-library-3413974-page) | Sitio público estático de presentación |
-| [`test-manager-library-3413974-infra`](https://github.com/code-sena/test-manager-library-3413974-infra) | Contenedores, red, volúmenes y motor de base de datos vacío |
-| [`test-manager-library-3413974-tool`](https://github.com/code-sena/test-manager-library-3413974-tool) | Utilidades: sembrador de datos de demostración |
+| Dato | Cantidad | Nota |
+|---|---|---|
+| Libros | 40 | repartidos en las 5 categorías, de 2 a 6 ejemplares |
+| Socios | 10 | documentos `1098000001` a `1098000010` |
+| Préstamos vencidos | 3 | socios 1 a 3, un libro cada uno |
+| Otros préstamos | 12 | socios 4 a 10; nadie supera 3 libros sin devolver |
+| Devoluciones | 2 | un préstamo cerrado y otro parcial |

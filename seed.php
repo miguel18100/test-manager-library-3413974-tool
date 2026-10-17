@@ -1,176 +1,176 @@
 <?php
 
+declare(strict_types=1);
+
 /**
- * Sembrador de datos de demostración (T-21, RNF-1).
- * Usa EXCLUSIVAMENTE la API REST (data-model §9).
- * Siembra:
- *   - 1 usuario bibliotecario
- *   - 40 libros en las 5 categorías
- *   - 10 socios
- *   - 15 préstamos (algunos con líneas devueltas, otros activos, y 3 vencidos)
+ * Sembrador de datos de demostración (T-21).
+ *
+ * Usa EXCLUSIVAMENTE la API REST: nunca toca la base con SQL (data-model.md §9).
+ * Siembra 1 bibliotecario, 40 libros, 10 socios y 15 préstamos, 3 de ellos vencidos.
+ *
+ * Variables de entorno:
+ *   API_URL                      (opcional) por defecto http://localhost:8000/api/v1
+ *   ADMIN_USERNAME, ADMIN_PASSWORD   (obligatorias) las mismas con que arrancó la API
+ *   SEED_LIBRARIAN_PASSWORD      (opcional) si falta se genera una al azar y se imprime una vez
+ *
+ * Los préstamos vencidos se registran con la cabecera X-Simulated-Time (hace 20 días). La API solo
+ * la acepta si arrancó con ALLOW_SIMULATED_TIME=true (ver manager-library-infra).
  */
 
-$baseUrl = getenv('API_URL') ?: 'http://localhost:8000/api/v1';
-$adminUser = getenv('ADMIN_USERNAME') ?: 'admin';
+const BOOK_COUNT = 40;
+const MEMBER_COUNT = 10;
+const OVERDUE_LOANS = 3;
+const NORMAL_LOANS = 12;
+
+$baseUrl = rtrim(getenv('API_URL') ?: 'http://localhost:8000/api/v1', '/');
+$adminUser = getenv('ADMIN_USERNAME');
 $adminPass = getenv('ADMIN_PASSWORD');
 
-echo "=== Iniciando Sembrador Manager Library (API: {$baseUrl}) ===\n";
+if (! $adminUser || ! $adminPass) {
+    fwrite(STDERR, "Define ADMIN_USERNAME y ADMIN_PASSWORD en el entorno (no se guardan en el código).\n");
+    exit(1);
+}
 
-function request($method, $url, $body = null, $token = null, $extraHeaders = []) {
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    
-    $headers = ['Content-Type: application/json', 'Accept: application/json'];
-    if ($token) {
+/** @return array{status:int, data:mixed} */
+function call(string $method, string $url, ?array $body = null, ?string $token = null, array $extraHeaders = []): array
+{
+    $curl = curl_init($url);
+    $headers = ['Content-Type: application/json', 'Accept: application/json', ...$extraHeaders];
+    if ($token !== null) {
         $headers[] = "Authorization: Bearer {$token}";
     }
-    foreach ($extraHeaders as $h) {
-        $headers[] = $h;
-    }
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CUSTOMREQUEST => $method,
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_TIMEOUT => 30,
+    ]);
     if ($body !== null) {
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
+        curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($body, JSON_UNESCAPED_UNICODE));
+    }
+    $raw = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    curl_close($curl);
+
+    return ['status' => $status, 'data' => is_string($raw) ? json_decode($raw, true) : null];
+}
+
+function fail(string $message): never
+{
+    fwrite(STDERR, "ERROR: {$message}\n");
+    exit(1);
+}
+
+function expectStatus(array $response, int $expected, string $what): array
+{
+    if ($response['status'] !== $expected) {
+        $code = $response['data']['code'] ?? 'sin código';
+        fail("{$what} respondió {$response['status']} ({$code}), se esperaba {$expected}.");
     }
 
-    $res = curl_exec($ch);
-    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    $json = json_decode($res, true);
-    return ['status' => $status, 'data' => $json, 'raw' => $res];
+    return $response['data'];
 }
 
-// 1. Iniciar sesión como Admin
-echo "1. Autenticando administrador...\n";
-$auth = request('POST', "{$baseUrl}/auth/login", [
-    'username' => $adminUser,
-    'password' => $adminPass,
-]);
+echo "=== Sembrador de Manager Library ({$baseUrl}) ===\n";
 
-if ($auth['status'] !== 200 || empty($auth['data']['access_token'])) {
-    die("ERROR: No se pudo autenticar como admin ({$auth['status']}): {$auth['raw']}\n");
-}
-$token = $auth['data']['access_token'];
-echo "   Autenticado con éxito (rol: {$auth['data']['role']}).\n";
+// 1. Sesión de administrador
+$login = expectStatus(call('POST', "{$baseUrl}/auth/login", ['username' => $adminUser, 'password' => $adminPass]), 200, 'El inicio de sesión');
+$token = $login['access_token'];
+echo "1. Sesión iniciada como {$login['role']}.\n";
 
-// 2. Obtener Categorías
-echo "2. Obteniendo categorías...\n";
-$catRes = request('GET', "{$baseUrl}/categories", null, $token);
-$categories = $catRes['data'];
-if (empty($categories)) {
-    die("ERROR: No se encontraron categorías.\n");
-}
-$catMap = [];
-foreach ($categories as $c) {
-    $catMap[$c['name']] = $c['id'];
-}
-echo "   " . count($categories) . " categorías encontradas.\n";
-
-// 3. Crear Bibliotecario
-echo "3. Creando bibliotecario 'ana'...\n";
-$libRes = request('POST', "{$baseUrl}/users", [
-    'username' => 'ana',
-    'password' => getenv('SEED_LIBRARIAN_PASSWORD'),
-    'role' => 'librarian',
-], $token);
-if ($libRes['status'] === 201) {
-    echo "   Bibliotecario creado.\n";
-} elseif ($libRes['status'] === 409) {
-    echo "   Bibliotecario ya existía (409).\n";
+// 2. La base debe estar vacía de datos de demostración
+$existing = expectStatus(call('GET', "{$baseUrl}/books?size=1", null, $token), 200, 'La consulta de libros');
+if (($existing['total'] ?? 0) > 0) {
+    fail('La base ya tiene libros. El sembrador espera una base recién creada (docker compose down -v).');
 }
 
-// 4. Crear 40 Libros
-echo "4. Sembrando 40 libros...\n";
-$createdBooks = [];
-$catNames = array_keys($catMap);
+// 3. Categorías (las cinco vienen sembradas por la migración)
+$categories = expectStatus(call('GET', "{$baseUrl}/categories", null, $token), 200, 'La consulta de categorías');
+if (count($categories) !== 5) {
+    fail('Se esperaban 5 categorías y hay '.count($categories).'.');
+}
+echo '2. '.count($categories)." categorías encontradas.\n";
 
-for ($i = 1; $i <= 40; $i++) {
-    $catName = $catNames[($i - 1) % count($catNames)];
-    $catId = $catMap[$catName];
-    $isbn = sprintf('978%010d', 1000000000 + $i);
-    $copies = ($i % 5) + 2; // entre 2 y 6 copias
+// 4. Bibliotecario
+$librarianPassword = getenv('SEED_LIBRARIAN_PASSWORD') ?: bin2hex(random_bytes(8));
+$librarian = call('POST', "{$baseUrl}/users", ['username' => 'ana', 'password' => $librarianPassword, 'role' => 'librarian'], $token);
+if ($librarian['status'] === 201) {
+    echo "3. Bibliotecario «ana» creado. Contraseña: {$librarianPassword}\n";
+} elseif ($librarian['status'] === 409) {
+    echo "3. El bibliotecario «ana» ya existía.\n";
+} else {
+    fail("Crear al bibliotecario respondió {$librarian['status']}.");
+}
 
-    $bookData = [
-        'title' => "Libro Ejemplar #{$i} de {$catName}",
-        'author' => "Autor Literario {$i}",
-        'isbn' => $isbn,
-        'category_id' => $catId,
-        'total_copies' => $copies,
-    ];
+// 5. Libros
+$books = [];
+for ($i = 1; $i <= BOOK_COUNT; $i++) {
+    $category = $categories[($i - 1) % count($categories)];
+    $created = expectStatus(call('POST', "{$baseUrl}/books", [
+        'title' => "Libro de muestra {$i} ({$category['name']})",
+        'author' => "Autor de muestra {$i}",
+        'isbn' => sprintf('978%010d', 1000000000 + $i),
+        'category_id' => $category['id'],
+        'total_copies' => ($i % 5) + 2,
+    ], $token), 201, "El libro {$i}");
+    $books[] = $created;
+}
+echo '4. '.count($books)." libros creados.\n";
 
-    $bRes = request('POST', "{$baseUrl}/books", $bookData, $token);
-    if ($bRes['status'] === 201) {
-        $createdBooks[] = $bRes['data'];
-    } elseif ($bRes['status'] === 409) {
-        // Si ya existe por ISBN, buscarlo
-        $sRes = request('GET', "{$baseUrl}/books?q=" . urlencode($isbn), null, $token);
-        if (!empty($sRes['data']['items'][0])) {
-            $createdBooks[] = $sRes['data']['items'][0];
-        }
+// 6. Socios
+$members = [];
+for ($i = 1; $i <= MEMBER_COUNT; $i++) {
+    $members[] = expectStatus(call('POST', "{$baseUrl}/members", [
+        'full_name' => "Socio de muestra {$i}",
+        'document_number' => sprintf('1098%06d', $i),
+    ], $token), 201, "El socio {$i}");
+}
+echo '5. '.count($members)." socios creados.\n";
+
+// 7. Préstamos. Los tres vencidos van primero y a nombre de los socios 0, 1 y 2, que luego no
+//    piden más (RN-3). Los demás reparten un libro por préstamo entre los socios 3 a 9, salvo dos
+//    préstamos de dos libros: así nadie supera los 3 libros sin devolver (RN-2).
+$bookIndex = 0;
+$simulatedPast = gmdate('Y-m-d\TH:i:s\Z', time() - 20 * 86400);
+$loans = [];
+
+for ($i = 0; $i < OVERDUE_LOANS; $i++) {
+    $response = call('POST', "{$baseUrl}/loans", [
+        'member_id' => $members[$i]['id'],
+        'items' => [['book_id' => $books[$bookIndex++]['id']]],
+    ], $token, ["X-Simulated-Time: {$simulatedPast}"]);
+    $loans[] = expectStatus($response, 201, 'El préstamo vencido '.($i + 1));
+}
+
+for ($j = 0; $j < NORMAL_LOANS; $j++) {
+    $lines = in_array($j, [5, 6], true) ? 2 : 1;
+    $items = [];
+    for ($k = 0; $k < $lines; $k++) {
+        $items[] = ['book_id' => $books[$bookIndex++]['id']];
     }
-}
-echo "   " . count($createdBooks) . " libros listos.\n";
-
-// 5. Crear 10 Socios
-echo "5. Sembrando 10 socios...\n";
-$createdMembers = [];
-for ($i = 1; $i <= 10; $i++) {
-    $doc = sprintf('1098%06d', $i);
-    $mData = [
-        'full_name' => "Socio Lector #{$i}",
-        'document_number' => $doc,
-    ];
-    $mRes = request('POST', "{$baseUrl}/members", $mData, $token);
-    if ($mRes['status'] === 201) {
-        $createdMembers[] = $mRes['data'];
-    } elseif ($mRes['status'] === 409) {
-        $sRes = request('GET', "{$baseUrl}/members?q=" . urlencode($doc), null, $token);
-        if (!empty($sRes['data']['items'][0])) {
-            $createdMembers[] = $sRes['data']['items'][0];
-        }
-    }
-}
-echo "   " . count($createdMembers) . " socios listos.\n";
-
-// 6. Crear 15 Préstamos (con 3 vencidos usando simulación de tiempo si disponible)
-echo "6. Sembrando 15 préstamos...\n";
-$loansCreated = 0;
-for ($i = 0; $i < 15; $i++) {
-    $member = $createdMembers[$i % count($createdMembers)];
-    // Asignar de 1 a 2 libros
-    $bookA = $createdBooks[($i * 2) % count($createdBooks)];
-    $bookB = $createdBooks[($i * 2 + 1) % count($createdBooks)];
-
-    $items = [['book_id' => $bookA['id']]];
-    if ($bookA['id'] !== $bookB['id']) {
-        $items[] = ['book_id' => $bookB['id']];
-    }
-
-    $extraHeaders = [];
-    // Para los primeros 3 préstamos, enviar fecha simulada en el pasado para que queden vencidos
-    if ($i < 3) {
-        $pastDate = date('Y-m-d\TH:i:s\Z', strtotime('-20 days'));
-        $extraHeaders[] = "X-Simulated-Time: {$pastDate}";
-    }
-
-    $lRes = request('POST', "{$baseUrl}/loans", [
-        'member_id' => $member['id'],
+    $loans[] = expectStatus(call('POST', "{$baseUrl}/loans", [
+        'member_id' => $members[OVERDUE_LOANS + ($j % 7)]['id'],
         'items' => $items,
-    ], $token, $extraHeaders);
-
-    if ($lRes['status'] === 201) {
-        $loansCreated++;
-        // Devolver una línea en algunos préstamos (ej. el #5 y #6)
-        if ($i >= 5 && $i <= 6 && !empty($lRes['data']['items'][0])) {
-            $loanId = $lRes['data']['id'];
-            $itemId = $lRes['data']['items'][0]['id'];
-            request('POST', "{$baseUrl}/loans/{$loanId}/items/{$itemId}/return", null, $token);
-        }
-    }
+    ], $token), 201, 'El préstamo '.($j + 1));
 }
-echo "   {$loansCreated} préstamos creados.\n";
+echo '6. '.count($loans)." préstamos registrados.\n";
 
-echo "=== Sembrado completado con éxito ===\n";
+// 8. Algunas devoluciones: un préstamo queda cerrado y otro, parcial
+$firstNormal = $loans[OVERDUE_LOANS];
+expectStatus(call('POST', "{$baseUrl}/loans/{$firstNormal['id']}/items/{$firstNormal['items'][0]['id']}/return", null, $token), 200, 'La devolución');
+$partial = $loans[OVERDUE_LOANS + 5];
+expectStatus(call('POST', "{$baseUrl}/loans/{$partial['id']}/items/{$partial['items'][0]['id']}/return", null, $token), 200, 'La devolución parcial');
+echo "7. Devoluciones registradas.\n";
 
+// 9. Verificación: T-21 pide 3 líneas vencidas y un reporte con filas
+$overdue = expectStatus(call('GET', "{$baseUrl}/loans/overdue", null, $token), 200, 'La consulta de vencidos');
+if (($overdue['total'] ?? 0) !== OVERDUE_LOANS) {
+    fail('Se esperaban '.OVERDUE_LOANS.' líneas vencidas y hay '.($overdue['total'] ?? 0).'. ¿La API arrancó con ALLOW_SIMULATED_TIME=true?');
+}
+$report = expectStatus(call('GET', "{$baseUrl}/reports/most-borrowed?from=".gmdate('Y-m-d', time() - 30 * 86400).'&to='.gmdate('Y-m-d'), null, $token), 200, 'El reporte');
+if (count($report['rows'] ?? []) === 0) {
+    fail('El reporte de más prestados salió vacío.');
+}
+
+echo '8. Verificado: '.$overdue['total'].' vencidos y '.count($report['rows'])." filas en el reporte.\n";
+echo "=== Sembrado completado ===\n";
